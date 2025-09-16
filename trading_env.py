@@ -25,14 +25,15 @@ SOFTWARE.
 
 import logging
 import tempfile
+import os
 
-import gym
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 import numpy as np
 import pandas as pd
-from gym import spaces
-from gym.utils import seeding
 from sklearn.preprocessing import scale
-import talib
+import talib  # Make sure TA-Lib is installed (brew install ta-lib, then pip install TA-Lib)
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
@@ -69,14 +70,22 @@ class DataSource:
         self.offset = None
 
     def load_data(self):
+        import os
         log.info('loading data for {}...'.format(self.ticker))
-        idx = pd.IndexSlice
-        with pd.HDFStore('../data/assets.h5') as store:
-            df = (store['quandl/wiki/prices']
-                  .loc[idx[:, self.ticker],
-                       ['adj_close', 'adj_volume', 'adj_low', 'adj_high']]
-                  .dropna()
-                  .sort_index())
+        # Build the absolute path for the CSV file located in the 'data' folder inside this repository
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_path = os.path.join(base_dir, "data", "WIKI_PRICES.csv")
+        log.info('Using data file at: %s', data_path)
+        # Read CSV file containing the dataset; parse 'date' column as datetime
+        df = pd.read_csv(data_path, parse_dates=['date'])
+        # Filter rows for the selected ticker
+        df = df[df['ticker'] == self.ticker].copy()
+        # Sort by date and set date as index
+        df.sort_values('date', inplace=True)
+        df.set_index('date', inplace=True)
+        # Select required adjusted columns and drop missing values
+        df = df[['adj_close', 'adj_volume', 'adj_low', 'adj_high']].dropna()
+        # Rename columns to standard names
         df.columns = ['close', 'volume', 'low', 'high']
         log.info('got data for {}...'.format(self.ticker))
         return df
@@ -239,8 +248,8 @@ class TradingEnvironment(gym.Env):
                                           trading_cost_bps=self.trading_cost_bps,
                                           time_cost_bps=self.time_cost_bps)
         self.action_space = spaces.Discrete(3)
-        self.observation_space = spaces.Box(self.data_source.min_values,
-                                            self.data_source.max_values)
+        self.observation_space = spaces.Box(low=self.data_source.min_values.values,
+                                            high=self.data_source.max_values.values)
         self.reset()
 
     def seed(self, seed=None):
@@ -248,18 +257,24 @@ class TradingEnvironment(gym.Env):
         return [seed]
 
     def step(self, action):
-        """Returns state observation, reward, done and info"""
+        """Returns state observation, reward, terminated, truncated, and info"""
         assert self.action_space.contains(action), '{} {} invalid'.format(action, type(action))
         observation, done = self.data_source.take_step()
         reward, info = self.simulator.take_step(action=action,
                                                 market_return=observation[0])
-        return observation, reward, done, info
+        terminated = done
+        truncated = False
+        return observation, reward, terminated, truncated, info
 
-    def reset(self):
-        """Resets DataSource and TradingSimulator; returns first observation"""
+    def reset(self, seed=None, options=None):
+        """Resets DataSource and TradingSimulator; returns first observation and info"""
+        if seed is not None:
+            self.seed(seed)
         self.data_source.reset()
         self.simulator.reset()
-        return self.data_source.take_step()[0]
+        observation = self.data_source.take_step()[0]
+        info = {}
+        return observation, info
 
     # TODO
     def render(self, mode='human'):
